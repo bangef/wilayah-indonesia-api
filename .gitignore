@@ -1,0 +1,36 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+*.pprof
+mem.pprof
+cpu.pprof
+
+# Environment variables
+.env
+!.env.example
+
+# IDEs & Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# ALL DEV DOCS
+PHASES.md
+PRD.md
+SECURITY.md
+/phases
+/deploy
+/docs/swagger
