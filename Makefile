@@ -1,4 +1,4 @@
-.PHONY: run test build db-check redis-check check-all seed migrate-up migrate-down swagger
+.PHONY: run test build db-check redis-check check-all seed migrate-up migrate-down migrate-rollback migrate-refresh migrate-reset migrate-version migrate-status swagger
 
 run:
 	go run cmd/api/main.go
@@ -17,16 +17,28 @@ redis-check:
 	redis-cli -h 127.0.0.1 -p 6379 ping
 
 migrate-up:
-	@for file in $$(ls migrations/*.up.sql | sort); do \
-		echo "Mengeksekusi migrasi $$file..."; \
-		PGPASSWORD=$$(grep DB_PASSWORD .env | cut -d '=' -f2) psql -h $$(grep DB_HOST .env | cut -d '=' -f2) -U $$(grep DB_USER .env | cut -d '=' -f2) -d $$(grep DB_NAME .env | cut -d '=' -f2) -f $$file; \
-	done
+	@go run cmd/migrator/main.go -action=up
 
-migrate-down:
-	@for file in $$(ls -r migrations/*.down.sql | sort -r); do \
-		echo "Melakukan rollback migrasi $$file..."; \
-		PGPASSWORD=$$(grep DB_PASSWORD .env | cut -d '=' -f2) psql -h $$(grep DB_HOST .env | cut -d '=' -f2) -U $$(grep DB_USER .env | cut -d '=' -f2) -d $$(grep DB_NAME .env | cut -d '=' -f2) -f $$file; \
-	done
+migrate-rollback:
+	@go run cmd/migrator/main.go -action=rollback -steps=$(or $(STEPS),1)
+
+migrate-down: migrate-rollback
+
+migrate-refresh:
+	@go run cmd/migrator/main.go -action=refresh -seed=$(or $(SEED),false) -force=$(or $(FORCE),false)
+
+migrate-reset:
+	@go run cmd/migrator/main.go -action=reset -force=$(or $(FORCE),false)
+
+migrate-version:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "[ERROR] Parameter VERSION wajib diisi. Contoh: make migrate-version VERSION=000002"; \
+		exit 1; \
+	fi
+	@go run cmd/migrator/main.go -action=version -target=$(VERSION)
+
+migrate-status:
+	@go run cmd/migrator/main.go -action=status
 
 swagger:
 	@which swag > /dev/null 2>&1 || (echo "Menginstal swag CLI..." && go install github.com/swaggo/swag/cmd/swag@latest)
