@@ -5,6 +5,7 @@ import (
 	_ "be_region_indonesia/docs/swagger"
 	"be_region_indonesia/internal/delivery/http/handler"
 	"be_region_indonesia/internal/delivery/http/middleware"
+	"be_region_indonesia/internal/domain"
 	"be_region_indonesia/pkg/validator"
 
 	"github.com/labstack/echo/v4"
@@ -17,6 +18,8 @@ type RouterConfig struct {
 	App           *echo.Echo
 	Cfg           *config.Config
 	RedisClient   *redis.Client
+	AuthRepo      domain.AuthRepository
+	AuthCache     domain.AuthCacheRepository
 	ReadHandler   *handler.RegionReadHandler
 	WriteHandler  *handler.RegionWriteHandler
 	HealthHandler *handler.HealthHandler
@@ -57,13 +60,13 @@ func SetupRouter(rc RouterConfig) {
 		"auth_login",
 	)
 
-	// Liveness & Readiness Probes (Root level, unthrottled for orchestrators/systemd)
+	// Liveness & Readiness Probes
 	if rc.HealthHandler != nil {
 		e.GET("/healthz", rc.HealthHandler.Healthz)
 		e.GET("/readyz", rc.HealthHandler.Readyz)
 	}
 
-	// 4. Interactive Swagger / OpenAPI UI (Conditional via SWAGGER_ENABLED)
+	// 4. Interactive Swagger / OpenAPI UI
 	if rc.Cfg != nil && rc.Cfg.SwaggerEnabled {
 		e.GET("/swagger/*", echoSwagger.WrapHandler, publicRateLimiter)
 	}
@@ -72,11 +75,17 @@ func SetupRouter(rc RouterConfig) {
 	v1 := e.Group("/api/v1")
 
 	// ==========================================
-	// AUTHENTICATION ROUTES (Login)
+	// AUTHENTICATION ROUTES (Dual-Token & PBAC)
 	// ==========================================
 	if rc.AuthHandler != nil {
 		auth := v1.Group("/auth", authRateLimiter)
 		auth.POST("/login", rc.AuthHandler.Login)
+		auth.POST("/refresh", rc.AuthHandler.Refresh)
+
+		// Authenticated Auth Endpoints
+		authProtected := auth.Group("", middleware.JWTAuthMiddleware(rc.Cfg.JWTSecret, rc.RedisClient))
+		authProtected.POST("/logout", rc.AuthHandler.Logout)
+		authProtected.GET("/me", rc.AuthHandler.Me)
 	}
 
 	// ==========================================
@@ -109,29 +118,34 @@ func SetupRouter(rc RouterConfig) {
 	}
 
 	// ==========================================
-	// PROTECTED WRITE ROUTES (Admin CRUD Tier)
+	// PROTECTED WRITE ROUTES (PBAC Granular Permissions)
 	// ==========================================
-	adminAuth := middleware.JWTAuthMiddleware(rc.Cfg.JWTSecret, rc.RedisClient, "ADMIN", "SUPERADMIN")
-	protected := v1.Group("", writeRateLimiter, adminAuth)
+	jwtAuth := middleware.JWTAuthMiddleware(rc.Cfg.JWTSecret, rc.RedisClient)
+	writeGroup := v1.Group("", writeRateLimiter, jwtAuth)
 	{
+		permCreate := middleware.RequirePermission(rc.AuthRepo, rc.AuthCache, "regions:create")
+		permUpdate := middleware.RequirePermission(rc.AuthRepo, rc.AuthCache, "regions:update")
+		permDelete := middleware.RequirePermission(rc.AuthRepo, rc.AuthCache, "regions:delete")
+		permPostal := middleware.RequirePermission(rc.AuthRepo, rc.AuthCache, "postal:update")
+
 		// Level 1: Province CRUD
-		protected.POST("/provinces", rc.WriteHandler.CreateProvince)
+		writeGroup.POST("/provinces", rc.WriteHandler.CreateProvince, permCreate)
 
 		// Level 2: Regency based on Province
-		protected.POST("/provinces/:code/regencies", rc.WriteHandler.CreateRegency)
+		writeGroup.POST("/provinces/:code/regencies", rc.WriteHandler.CreateRegency, permCreate)
 
 		// Level 3: District based on Regency
-		protected.POST("/regencies/:code/districts", rc.WriteHandler.CreateDistrict)
+		writeGroup.POST("/regencies/:code/districts", rc.WriteHandler.CreateDistrict, permCreate)
 
 		// Level 4: Village based on District
-		protected.POST("/districts/:code/villages", rc.WriteHandler.CreateVillage)
+		writeGroup.POST("/districts/:code/villages", rc.WriteHandler.CreateVillage, permCreate)
 
 		// Level 5: Postal Code based on Village
-		protected.POST("/villages/:code/postal-codes", rc.WriteHandler.CreatePostalCode)
-		protected.PUT("/villages/:code/postal-code", rc.WriteHandler.UpdateVillagePostalCode)
+		writeGroup.POST("/villages/:code/postal-codes", rc.WriteHandler.CreatePostalCode, permPostal)
+		writeGroup.PUT("/villages/:code/postal-code", rc.WriteHandler.UpdateVillagePostalCode, permPostal)
 
 		// General Update & Delete by Code
-		protected.PUT("/regions/:code", rc.WriteHandler.UpdateRegion)
-		protected.DELETE("/regions/:code", rc.WriteHandler.DeleteRegion)
+		writeGroup.PUT("/regions/:code", rc.WriteHandler.UpdateRegion, permUpdate)
+		writeGroup.DELETE("/regions/:code", rc.WriteHandler.DeleteRegion, permDelete)
 	}
 }

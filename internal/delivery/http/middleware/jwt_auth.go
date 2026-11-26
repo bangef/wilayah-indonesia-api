@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,8 +13,11 @@ import (
 )
 
 type JWTClaims struct {
-	UserID string `json:"user_id"`
-	Role   string `json:"role"`
+	UserID      string   `json:"user_id"`
+	Username    string   `json:"username"`
+	RegionScope string   `json:"region_scope"`
+	Roles       []string `json:"roles"`
+	Role        string   `json:"role,omitempty"` // legacy compatibility
 	jwt.RegisteredClaims
 }
 
@@ -67,44 +69,64 @@ func JWTAuthMiddleware(jwtSecret string, rdb *redis.Client, requiredRoles ...str
 				}
 			}
 
-			// Cek otorisasi peran (Role-Based Access Control)
+			// Cek otorisasi peran jika parameter requiredRoles diberikan
 			if len(requiredRoles) > 0 {
-				authorized := false
-				for _, r := range requiredRoles {
-					if strings.EqualFold(claims.Role, r) {
-						authorized = true
-						break
+				hasRole := false
+
+				// Check legacy claims.Role
+				if claims.Role != "" {
+					for _, req := range requiredRoles {
+						if strings.EqualFold(claims.Role, req) {
+							hasRole = true
+							break
+						}
 					}
 				}
-				if !authorized {
+
+				// Check roles array
+				if !hasRole {
+					for _, r := range claims.Roles {
+						for _, req := range requiredRoles {
+							if strings.EqualFold(r, req) {
+								hasRole = true
+								break
+							}
+						}
+						if hasRole {
+							break
+						}
+					}
+				}
+
+				if !hasRole {
 					return response.Error(
 						c,
 						http.StatusForbidden,
-						"Hak akses tidak mencukupi untuk mengakses sumber daya ini.",
-						response.FieldError{Field: "role", Issue: fmt.Sprintf("Peran '%s' tidak memiliki izin untuk melakukan tindakan ini.", claims.Role)},
+						"Akses ditolak. Peran Anda tidak memiliki hak untuk mengakses endpoint ini.",
+						response.FieldError{Field: "role", Issue: fmt.Sprintf("Dibutuhkan salah satu dari peran: %v", requiredRoles)},
 					)
 				}
 			}
 
+			// Set claims dan raw token ke konteks
 			c.Set("user", claims)
+			c.Set("token", token)
+			c.Set("raw_token", tokenStr)
+
 			return next(c)
 		}
 	}
 }
 
-// GenerateTestToken helper untuk testing otentikasi JWT
+// GenerateTestToken helper untuk testing
 func GenerateTestToken(jwtSecret, userID, role string) (string, error) {
-	if strings.TrimSpace(jwtSecret) == "" {
-		return "", errors.New("jwtSecret cannot be empty")
-	}
-	claims := JWTClaims{
-		UserID: userID,
-		Role:   role,
+	claims := &JWTClaims{
+		UserID:   userID,
+		Username: "admin",
+		Roles:    []string{role},
+		Role:     role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID,
-			ID:        "test-token-id-12345",
-			Issuer:    "be-region-auth-service",
-			Audience:  jwt.ClaimStrings{"be-region-api"},
+			Subject: userID,
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

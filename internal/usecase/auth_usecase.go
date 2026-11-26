@@ -3,10 +3,10 @@ package usecase
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strings"
+	"log/slog"
 	"time"
 
 	"be_region_indonesia/config"
@@ -14,88 +14,211 @@ import (
 	"be_region_indonesia/internal/domain"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type authUsecase struct {
-	cfg *config.Config
+	cfg       *config.Config
+	authRepo  domain.AuthRepository
+	authCache domain.AuthCacheRepository
 }
 
-func NewAuthUsecase(cfg *config.Config) domain.AuthUsecase {
+func NewAuthUsecase(cfg *config.Config, authRepo domain.AuthRepository, authCache domain.AuthCacheRepository) domain.AuthUsecase {
 	return &authUsecase{
-		cfg: cfg,
+		cfg:       cfg,
+		authRepo:  authRepo,
+		authCache: authCache,
 	}
+}
+
+func hashSHA256(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func generateRandomHex(byteCount int) (string, error) {
+	bytes := make([]byte, byteCount)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 func (u *authUsecase) Login(ctx context.Context, username, password string) (*domain.LoginResult, error) {
-	expectedUsername := u.cfg.AdminDefaultUsername
-	if expectedUsername == "" {
-		expectedUsername = "admin"
-	}
-
-	expectedPassword := u.cfg.AdminDefaultPassword
-	if expectedPassword == "" {
-		expectedPassword = "AdminRegional2026!"
-	}
-
-	// Constant-time comparison to prevent timing attacks on username and password
-	userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUsername)) == 1
-	passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(expectedPassword)) == 1
-
-	if !userMatch || !passMatch {
+	user, passwordHash, err := u.authRepo.GetUserByUsername(ctx, username)
+	if err != nil {
 		return nil, domain.ErrInvalidCredentials
 	}
 
-	// Generate unique JTI (token id) for revocation capability
-	tokenBytes := make([]byte, 16)
-	_, _ = rand.Read(tokenBytes)
-	jti := hex.EncodeToString(tokenBytes)
-
-	userID := "usr_admin_001"
-	role := "ADMIN"
-	expiration := time.Duration(u.cfg.JWTExpirationM) * time.Minute
-	if expiration <= 0 {
-		expiration = 15 * time.Minute
-	}
-	expiresAt := time.Now().Add(expiration)
-
-	issuer := u.cfg.JWTIssuer
-	if strings.TrimSpace(issuer) == "" {
-		issuer = "be-region-auth-service"
+	if !user.IsActive {
+		return nil, domain.ErrUserDisabled
 	}
 
-	audience := u.cfg.JWTAudience
-	if strings.TrimSpace(audience) == "" {
-		audience = "be-region-api"
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
+		return nil, domain.ErrInvalidCredentials
 	}
 
-	claims := middleware.JWTClaims{
-		UserID: userID,
-		Role:   role,
+	familyID := uuid.New().String()
+	tokenPair, err := u.generateTokenPairWithFamily(ctx, user, familyID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Warm-up Redis permissions cache
+	perms, err := u.authRepo.GetUserPermissions(ctx, user.ID)
+	if err == nil && len(perms) > 0 {
+		_ = u.authCache.SetUserPermissions(ctx, user.ID, perms, 1*time.Hour)
+	}
+
+	return &domain.LoginResult{
+		AccessToken:      tokenPair.AccessToken,
+		RefreshToken:     tokenPair.RefreshToken,
+		TokenType:        tokenPair.TokenType,
+		ExpiresInSeconds: tokenPair.ExpiresInSeconds,
+		User:             *user,
+	}, nil
+}
+
+func (u *authUsecase) generateTokenPairWithFamily(ctx context.Context, user *domain.User, familyID string) (*domain.TokenPair, error) {
+	// 1. Generate JWT Access Token
+	jti, err := generateRandomHex(16)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate jti: %w", err)
+	}
+
+	accessTTL := time.Duration(u.cfg.JWTExpirationM) * time.Minute
+	if accessTTL <= 0 {
+		accessTTL = 15 * time.Minute
+	}
+	accessExpiresAt := time.Now().Add(accessTTL)
+
+	var roleCodes []string
+	for _, r := range user.Roles {
+		roleCodes = append(roleCodes, r.Code)
+	}
+
+	claims := &middleware.JWTClaims{
+		UserID:      user.ID,
+		Username:    user.Username,
+		RegionScope: user.RegionScope,
+		Roles:       roleCodes,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID,
 			ID:        jti,
-			Issuer:    issuer,
-			Audience:  jwt.ClaimStrings{audience},
-			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			Subject:   user.ID,
+			Issuer:    u.cfg.AppName,
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(accessExpiresAt),
 		},
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signedToken, err := token.SignedString([]byte(u.cfg.JWTSecret))
+	signedAccessToken, err := token.SignedString([]byte(u.cfg.JWTSecret))
 	if err != nil {
-		return nil, fmt.Errorf("gagal menandatangani token JWT: %w", err)
+		return nil, fmt.Errorf("failed to sign access token: %w", err)
 	}
 
-	return &domain.LoginResult{
-		AccessToken:      signedToken,
+	// 2. Generate Opaque Refresh Token
+	rawRefreshToken, err := generateRandomHex(32) // 64 chars hex
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
+	}
+	tokenHash := hashSHA256(rawRefreshToken)
+
+	refreshTTL := 7 * 24 * time.Hour
+	refreshExpiresAt := time.Now().Add(refreshTTL)
+
+	storedToken := &domain.RefreshToken{
+		ID:        uuid.New().String(),
+		UserID:    user.ID,
+		TokenHash: tokenHash,
+		FamilyID:  familyID,
+		IsRevoked: false,
+		ExpiresAt: refreshExpiresAt,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	if err := u.authRepo.SaveRefreshToken(ctx, storedToken); err != nil {
+		return nil, fmt.Errorf("failed to store refresh token: %w", err)
+	}
+
+	return &domain.TokenPair{
+		AccessToken:      signedAccessToken,
+		RefreshToken:     rawRefreshToken,
 		TokenType:        "Bearer",
-		ExpiresInSeconds: int(expiration.Seconds()),
-		User: domain.User{
-			ID:       userID,
-			Username: expectedUsername,
-			Role:     role,
-		},
+		ExpiresInSeconds: int(accessTTL.Seconds()),
 	}, nil
+}
+
+func (u *authUsecase) RefreshToken(ctx context.Context, rawRefreshToken string) (*domain.TokenPair, error) {
+	tokenHash := hashSHA256(rawRefreshToken)
+	storedToken, err := u.authRepo.GetRefreshTokenByHash(ctx, tokenHash)
+	if err != nil || storedToken == nil {
+		return nil, domain.ErrInvalidRefreshToken
+	}
+
+	// 1. Token Reuse Detection
+	if storedToken.IsRevoked {
+		_ = u.authRepo.RevokeTokenFamily(ctx, storedToken.FamilyID)
+		slog.Warn("Potensi pencurian token terdeteksi! Membatalkan seluruh family token",
+			slog.String("user_id", storedToken.UserID),
+			slog.String("family_id", storedToken.FamilyID),
+		)
+		return nil, domain.ErrTokenTheftDetected
+	}
+
+	// 2. Expiration check
+	if time.Now().After(storedToken.ExpiresAt) {
+		return nil, domain.ErrRefreshTokenExpired
+	}
+
+	// 3. Mark old token as revoked (Rotate)
+	if err := u.authRepo.RevokeRefreshToken(ctx, tokenHash); err != nil {
+		return nil, err
+	}
+
+	// 4. Retrieve user and issue new pair within same family
+	user, err := u.authRepo.GetUserByID(ctx, storedToken.UserID)
+	if err != nil || !user.IsActive {
+		return nil, domain.ErrUserDisabled
+	}
+
+	return u.generateTokenPairWithFamily(ctx, user, storedToken.FamilyID)
+}
+
+func (u *authUsecase) Logout(ctx context.Context, accessTokenJTI string, accessTokenTTL time.Duration, rawRefreshToken string, userID string) error {
+	// 1. Blacklist Access Token JTI
+	if accessTokenJTI != "" && accessTokenTTL > 0 {
+		_ = u.authCache.BlacklistAccessToken(ctx, accessTokenJTI, accessTokenTTL)
+	}
+
+	// 2. Revoke Refresh Token or all tokens for user
+	if rawRefreshToken != "" {
+		tokenHash := hashSHA256(rawRefreshToken)
+		_ = u.authRepo.RevokeRefreshToken(ctx, tokenHash)
+	} else if userID != "" {
+		_ = u.authRepo.RevokeAllUserRefreshTokens(ctx, userID)
+	}
+
+	// 3. Invalidate user permissions in cache
+	if userID != "" {
+		_ = u.authCache.InvalidateUserPermissions(ctx, userID)
+	}
+
+	return nil
+}
+
+func (u *authUsecase) GetMe(ctx context.Context, userID string) (*domain.User, []string, error) {
+	user, err := u.authRepo.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	perms, err := u.authRepo.GetUserPermissions(ctx, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return user, perms, nil
 }

@@ -1,6 +1,6 @@
 // @title           API Wilayah Administrasi Indonesia
 // @version         1.0.0
-// @description     Layanan backend berkinerja tinggi untuk data wilayah administrasi Republik Indonesia (Provinsi, Kabupaten/Kota, Kecamatan, Kelurahan/Desa, dan Kode Pos) dengan proteksi anti-stampede Singleflight dan Redis Caching.
+// @description     Layanan backend berkinerja tinggi untuk data wilayah administrasi Republik Indonesia (Provinsi, Kabupaten/Kota, Kecamatan, Kelurahan/Desa, dan Kode Pos) dengan otentikasi dual-token dan otorisasi dinamis PBAC / Granular RBAC.
 // @termsOfService  https://github.com/bangef/be_region_indonesia
 
 // @contact.name    Tim Engineering Backend
@@ -17,7 +17,7 @@
 // @securityDefinitions.apikey BearerAuth
 // @in header
 // @name Authorization
-// @description Masukkan token JWT dengan format: Bearer <token_admin>
+// @description Masukkan token JWT dengan format: Bearer <access_token>
 
 package main
 
@@ -71,10 +71,12 @@ func main() {
 	// 4. Inisialisasi Repositories
 	regionRepo := postgres.NewRegionRepository(pgPool.DB)
 	regionCache := cache.NewRedisRegionCache(redisPool.Client)
+	authRepo := postgres.NewAuthRepository(pgPool.DB)
+	authCache := cache.NewRedisAuthCache(redisPool.Client)
 
 	// 5. Inisialisasi Usecase Layer
 	regionUsecase := usecase.NewRegionUsecase(regionRepo, regionCache, cfg.RedisDefaultTTL)
-	authUsecase := usecase.NewAuthUsecase(cfg)
+	authUsecase := usecase.NewAuthUsecase(cfg, authRepo, authCache)
 
 	// 6. Inisialisasi HTTP Handlers
 	readHandler := handler.NewRegionReadHandler(regionUsecase)
@@ -90,6 +92,8 @@ func main() {
 		App:           e,
 		Cfg:           cfg,
 		RedisClient:   redisPool.Client,
+		AuthRepo:      authRepo,
+		AuthCache:     authCache,
 		ReadHandler:   readHandler,
 		WriteHandler:  writeHandler,
 		HealthHandler: healthHandler,
@@ -98,30 +102,30 @@ func main() {
 
 	serverAddr := fmt.Sprintf(":%d", cfg.AppPort)
 
-	// 8. Menjalankan Server di Goroutine terpisah
+	// 8. Menjalankan Server secara Non-Blocking (Goroutine)
 	go func() {
-		log.Printf("[READY] Server siap melayani request di http://127.0.0.1%s/api/v1\n", serverAddr)
-		log.Printf("[READY] Health probes aktif di http://127.0.0.1%s/healthz dan /readyz\n", serverAddr)
 		if err := e.Start(serverAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("[FATAL] Server HTTP crash: %v", err)
+			log.Fatalf("[FATAL] Server HTTP gagal berjalan: %v", err)
 		}
 	}()
+	log.Printf("[READY] Server aktif mendengarkan pada %s\n", serverAddr)
 
-	// 9. Graceful Shutdown: Menangkap sinyal interupsi OS (SIGINT, SIGTERM)
+	// 9. Graceful Shutdown Listener
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	sig := <-quit
-	log.Printf("[SHUTDOWN] Menerima sinyal OS (%v). Menutup server secara graceful...\n", sig)
+	<-quit
 
-	// Berikan batas waktu 15 detik untuk menyelesaikan request in-flight
+	log.Println("[SHUTDOWN] Sinyal penghentian diterima, memulai graceful shutdown...")
+
+	// Memberikan batas waktu toleransi maksimum 15 detik bagi request aktif
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	if err := e.Shutdown(ctx); err != nil {
-		log.Printf("[SHUTDOWN_ERROR] Gagal mematikan HTTP server secara mulus: %v\n", err)
+		log.Printf("[ERROR] Gagal melakukan graceful shutdown server HTTP: %v\n", err)
 	} else {
-		log.Println("[SHUTDOWN] HTTP listener dan in-flight request telah selesai dibersihkan.")
+		log.Println("[SHUTDOWN] Seluruh request aktif telah selesai diproses.")
 	}
 
-	log.Println("[SHUTDOWN] Server exiting successfully.")
+	log.Println("[EXIT] Aplikasi be_region_indonesia berhasil dimatikan secara bersih.")
 }

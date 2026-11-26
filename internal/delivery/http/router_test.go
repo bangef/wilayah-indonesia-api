@@ -40,8 +40,10 @@ func setupTestServer(t *testing.T) (*echo.Echo, *config.Config, func()) {
 
 	repo := postgres.NewRegionRepository(pgPool.DB)
 	cRepo := cache.NewRedisRegionCache(redisPool.Client)
+	authRepo := postgres.NewAuthRepository(pgPool.DB)
+	authCache := cache.NewRedisAuthCache(redisPool.Client)
 	uc := usecase.NewRegionUsecase(repo, cRepo, 168)
-	authUc := usecase.NewAuthUsecase(cfg)
+	authUc := usecase.NewAuthUsecase(cfg, authRepo, authCache)
 
 	readHandler := handler.NewRegionReadHandler(uc)
 	writeHandler := handler.NewRegionWriteHandler(uc)
@@ -52,6 +54,8 @@ func setupTestServer(t *testing.T) (*echo.Echo, *config.Config, func()) {
 		App:          e,
 		Cfg:          cfg,
 		RedisClient:  redisPool.Client,
+		AuthRepo:     authRepo,
+		AuthCache:    authCache,
 		ReadHandler:  readHandler,
 		WriteHandler: writeHandler,
 		AuthHandler:  authHandler,
