@@ -30,7 +30,7 @@ func SetupRouter(rc RouterConfig) {
 	e.Validator = validator.NewCustomValidator()
 	e.Use(echomw.Recover())
 	e.Use(echomw.RequestID())
-	e.Use(echomw.Logger())
+	e.Use(middleware.SlogMiddleware())
 
 	// 2. Security Perimeter Middleware
 	e.Use(middleware.SetupSecureHeaders())

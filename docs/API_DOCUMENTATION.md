@@ -362,3 +362,53 @@ curl -X GET "http://127.0.0.1:8080/api/v1/villages/11.01.01.2001/postal-code"
 - **Path Param:** `:code`
 - **Business Logic:** Sistem memvalidasi apakah ada child aktif (`WHERE code LIKE :code || '.%' AND deleted_at IS NULL`). Jika ada child aktif, penghapusan ditolak dengan status `409 Conflict`. Jika bersih, status menjadi soft delete dan cache terkait dihapus.
 - **Response Status:** `200 OK`
+
+---
+
+## 5. Observabilitas, Logging Terstruktur & VictoriaLogs
+
+Aplikasi memancarkan log terstruktur berformat JSON langsung ke `os.Stdout` menggunakan pustaka bawaan Go `log/slog`. Log ditangkap oleh `systemd-journald`, diproses oleh **Vector**, dan dikirimkan ke **VictoriaLogs** dengan tata kelola kardinalitas rendah.
+
+### 5.1 Format Log HTTP Request
+Setiap request HTTP dicatat dalam format JSON satu baris (*newline-delimited JSON*):
+```json
+{
+  "time": "2026-11-25T10:30:15.123456789+07:00",
+  "level": "INFO",
+  "msg": "http request completed",
+  "service": "be_region_indonesia",
+  "env": "prod",
+  "method": "GET",
+  "path": "/api/v1/villages/:code/postal-code",
+  "uri": "/api/v1/villages/11.01.01.2001/postal-code",
+  "status": 200,
+  "latency_ms": 1.45,
+  "remote_ip": "127.0.0.1",
+  "request_id": "c1f7a0b3-9e6b-4e12-b9cf-2a3b4c5d6e7f"
+}
+```
+
+### 5.2 Katalog Kueri LogsQL pada `vmui` (Port 9428)
+Antarmuka web VictoriaLogs UI dapat diakses pada `http://<IP-VPS>:9428/select/vmui/`:
+
+- **Melihat seluruh log aplikasi:**
+  ```logsql
+  service:"be_region_indonesia" | fields _time, level, status, method, path, latency_ms, request_id, msg
+  ```
+- **Melacak seluruh jejak request berdasarkan Request ID:**
+  ```logsql
+  request_id:"c1f7a0b3-9e6b-4e12-b9cf-2a3b4c5d6e7f"
+  ```
+- **Menemukan log error server (HTTP 5xx):**
+  ```logsql
+  service:"be_region_indonesia" AND status:>=500
+  ```
+- **Menemukan request lambat (*slow request* > 200 ms):**
+  ```logsql
+  service:"be_region_indonesia" AND latency_ms:>200
+  ```
+- **Distribusi status HTTP berdasarkan pola rute:**
+  ```logsql
+  service:"be_region_indonesia" | stats by (path, status) count()
+  ```
+

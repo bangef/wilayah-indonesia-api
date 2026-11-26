@@ -39,6 +39,7 @@ import (
 	"be_region_indonesia/internal/repository/postgres"
 	"be_region_indonesia/internal/usecase"
 	"be_region_indonesia/pkg/database"
+	"be_region_indonesia/pkg/logger"
 
 	"github.com/labstack/echo/v4"
 )
@@ -46,6 +47,9 @@ import (
 func main() {
 	// 1. Inisialisasi Konfigurasi (.env)
 	cfg := config.MustLoadConfig(".env")
+
+	// Inisialisasi Structured Logger (log/slog) ke os.Stdout
+	logger.InitLogger(cfg.AppName, cfg.AppEnv)
 	log.Printf("[BOOT] Memulai %s (%s mode) pada port %d...\n", cfg.AppName, cfg.AppEnv, cfg.AppPort)
 
 	// 2. Inisialisasi Database Connection Pool (PostgreSQL)
