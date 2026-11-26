@@ -40,7 +40,7 @@ func (h *RegionReadHandler) GetProvinces(c echo.Context) error {
 	if page < 1 {
 		page = 1
 	}
-	if limit < 1 || limit > 100 {
+	if limit < 1 || limit > 1000 {
 		limit = 20
 	}
 
@@ -276,7 +276,7 @@ func (h *RegionReadHandler) handleChildrenQuery(c echo.Context, parentCode strin
 	if page < 1 {
 		page = 1
 	}
-	if limit < 1 || limit > 100 {
+	if limit < 1 || limit > 1000 {
 		limit = 20
 	}
 

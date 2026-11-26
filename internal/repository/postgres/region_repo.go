@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"be_region_indonesia/internal/domain"
+
 	"github.com/lib/pq"
 )
 
@@ -71,7 +72,7 @@ func (r *RegionRepository) GetListByLevel(ctx context.Context, level int16, filt
 		page = 1
 	}
 	limit := filter.Limit
-	if limit < 1 || limit > 100 {
+	if limit < 1 || limit > 1000 {
 		limit = 20
 	}
 	offset := (page - 1) * limit
@@ -162,7 +163,7 @@ func (r *RegionRepository) GetChildrenByPrefix(ctx context.Context, parentCode s
 		page = 1
 	}
 	limit := filter.Limit
-	if limit < 1 || limit > 100 {
+	if limit < 1 || limit > 1000 {
 		limit = 20
 	}
 	offset := (page - 1) * limit
@@ -227,25 +228,17 @@ func (r *RegionRepository) GetChildrenByPrefix(ctx context.Context, parentCode s
 	var regions []domain.Region
 	for rows.Next() {
 		var reg domain.Region
-		var regType sql.NullString
-		var postalCode sql.NullString
 		if err := rows.Scan(
 			&reg.ID,
 			&reg.Code,
 			&reg.Name,
 			&reg.Level,
-			&regType,
-			&postalCode,
+			&reg.Type,
+			&reg.PostalCode,
 			&reg.CreatedAt,
 			&reg.UpdatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan child region row: %w", err)
-		}
-		if regType.Valid {
-			reg.Type = &regType.String
-		}
-		if postalCode.Valid {
-			reg.PostalCode = &postalCode.String
 		}
 		regions = append(regions, reg)
 	}

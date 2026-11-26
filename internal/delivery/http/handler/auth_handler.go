@@ -23,8 +23,8 @@ func NewAuthHandler(authUc domain.AuthUsecase) *AuthHandler {
 }
 
 type LoginRequest struct {
-	Username string `json:"username" validate:"required,min=3,max=50"`
-	Password string `json:"password" validate:"required,min=6,max=100"`
+	Username string `json:"username" validate:"required"`
+	Password string `json:"password" validate:"required"`
 }
 
 type LoginResponse struct {
